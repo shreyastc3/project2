@@ -1,0 +1,20 @@
+    AWSTemplateFormatVersion: '2010-09-09'
+    Description: Code Commit
+    Parameters:
+        RepositoryName:
+            Type: String        
+            Description: Enter repository name
+        RepositoryDescription: 
+            Type: String
+            Default: description test
+            Description: Enter repository description
+
+    Resources: 
+        CodeCommitRepo:
+            Type: AWS::CodeCommit::Repository
+            Properties:
+                RepositoryName:
+                    Ref: RepositoryName
+                RepositoryDescription: 
+                    Ref: RepositoryDescription
+                     

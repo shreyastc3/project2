@@ -1,73 +1,179 @@
 AWSTemplateFormatVersion: '2010-09-09'
+Description: Code Pipeline
 Parameters:
-  SubnetId:
-    Type: String
+  RepositoryName:
+      Type: String        
+      Description: Enter repository name
+
 Resources:
-  Cluster:
-    Type: 'AWS::ECS::Cluster'
+  RoleForCodePipeline:
+    Type: AWS::IAM::Role
     Properties:
-      ClusterName: web-app-cluster
-  LogGroup:
-    Type: 'AWS::Logs::LogGroup'
-    Properties:
-      LogGroupName: web-app-log-group
-  ExecutionRole:
-    Type: 'AWS::IAM::Role'
-    Properties:
-      RoleName: web-app-role
       AssumeRolePolicyDocument:
+        Version: 2012-10-17
         Statement:
           - Effect: Allow
             Principal:
-              Service: ecs-tasks.amazonaws.com
-            Action: 'sts:AssumeRole'
-      ManagedPolicyArns:
-        - 'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
-  ContainerSecurityGroup:
-    Type: 'AWS::EC2::SecurityGroup'
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Description: Role for Code Pipeline
+      Path: /
+      Policies:
+        - PolicyName: PolicyRolePipeline
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              Action:
+                - codecommit:CancelUploadArchive
+                - codecommit:GetBranch
+                - codecommit:GetCommit
+                - codecommit:GetUploadArchiveStatus
+                - codecommit:UploadArchive
+                - codebuild:*
+                - s3:*
+                - ecs:*
+                - iam:PassRole
+              Resource: '*'
+              Effect: Allow
+      RoleName: !Join [ "-", [ codepipeline, service, role, Ref: RepositoryName ] ]
+  RoleForCodeBuild:
+    Type: AWS::IAM::Role
     Properties:
-      GroupName: ContainerSecurityGroup
-      GroupDescription: Security group for NGINX container
-      SecurityGroupIngress:
-        - IpProtocol: tcp
-          FromPort: 80
-          ToPort: 80
-          CidrIp: 0.0.0.0/0
-  TaskDefinition:
-    Type: AWS::ECS::TaskDefinition
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Description: Role for Code Build
+      Path: /
+      Policies:
+        - PolicyName: PolicyRoleCodeBuild
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+                - s3:*
+                - codecommit:GitPull
+                - codebuild:CreateReportGroup
+                - codebuild:CreateReport
+                - codebuild:UpdateReport
+                - codebuild:BatchPutTestCase
+                - ecs:*
+              Resource: '*'
+              Effect: Allow
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryFullAccess
+      RoleName: !Join [ "-", [ codebuild, service, role, Ref: RepositoryName ] ]
+      
+  BucketForPipelineArtifact:
+    Type: AWS::S3::Bucket
     Properties:
-      Family: web-app-task
-      Cpu: 256
-      Memory: 512
-      NetworkMode: awsvpc
-      ExecutionRoleArn: !Ref ExecutionRole
-      ContainerDefinitions:
-        - Name: web-app
-          EntryPoint: [node, app.js]
-          Image: 376759142415.dkr.ecr.us-east-1.amazonaws.com/web-app:latest
-          PortMappings:
-            - ContainerPort: 80
-          LogConfiguration:
-            LogDriver: awslogs
-            Options:
-              awslogs-region: !Ref AWS::Region
-              awslogs-group: !Ref LogGroup
-              awslogs-stream-prefix: ecs
-      RequiresCompatibilities:
-        - EC2
-        - FARGATE
-  Service:
-    Type: AWS::ECS::Service
+      BucketName: !Join [ "-", [ codepipeline, artifacts, Ref: RepositoryName ] ]
+  BucketForBuildCache:
+    Type: AWS::S3::Bucket
     Properties:
-      ServiceName: web-app-service
-      Cluster: !Ref Cluster
-      TaskDefinition: !Ref TaskDefinition
-      DesiredCount: 1
-      LaunchType: FARGATE
-      NetworkConfiguration:
-        AwsvpcConfiguration:
-          AssignPublicIp: ENABLED
-          Subnets:
-            - !Ref SubnetId
-          SecurityGroups:
-            - !GetAtt ContainerSecurityGroup.GroupId
+      BucketName: !Join [ "-", [ codebuild, cache, Ref: RepositoryName ] ]
+  CodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: 
+        Ref: RepositoryName
+      ArtifactStore:
+        Location: 
+          Ref: BucketForPipelineArtifact
+        Type: S3
+      RestartExecutionOnUpdate: true
+      RoleArn: !GetAtt RoleForCodePipeline.Arn
+      Stages:
+        - Name: "SourceStage"
+          Actions:
+            - ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: 1
+              Configuration:
+                RepositoryName: 
+                  Ref: RepositoryName
+                BranchName: master
+              Name: "SourceCommitAction"
+              Region: "us-east-1"
+              RunOrder: 1
+              OutputArtifacts:
+                - Name: SourceOutput
+        - Name: "BuildStage"
+          Actions:
+            - InputArtifacts:
+                - Name: SourceOutput
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              Configuration:
+                ProjectName:
+                  Ref: CodeBuild                
+              Name: "Build"
+              Region: "us-east-1"
+              RunOrder: 2
+              OutputArtifacts:
+                - Name: BuildOutput 
+        
+        - Name: "Deploy"
+          Actions:
+          - Name: Deploy
+            ActionTypeId:
+              Category: Deploy
+              Owner: AWS
+              Version: 1
+              Provider: ECS
+            InputArtifacts:
+              - Name: BuildOutput
+            Configuration:
+              ClusterName: web-app-cluster
+              ServiceName: web-app-service
+            Region: "us-east-1"    
+            RunOrder: 3       
+              
+  CodeBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Source: 
+        Type: CODEPIPELINE 
+        BuildSpec: buildspec.yml
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: "aws/codebuild/standard:4.0-20.05.05"
+        ImagePullCredentialsType: CODEBUILD
+        PrivilegedMode: True
+        EnvironmentVariables: 
+          - Name: AWS_ACCOUNT_ID
+            Value: AWS::AccountId
+            Type: PLAINTEXT
+          - Name: IMAGE_REPO_NAME
+            Value: 
+              Ref: RepositoryName
+            Type: PLAINTEXT
+          - Name: ECR_REPOSITORY_URI
+            Value: !Join [ ".", [ !Ref "AWS::AccountId", "dkr.ecr", !Ref "AWS::Region", !Join [ "/", [ "amazonaws.com", !Ref RepositoryName] ] ] 
+      Cache:
+        Location: 
+          Ref: BucketForBuildCache
+        Type: S3 
+      Name: 
+        Ref: RepositoryName
+      ServiceRole: 
+        Ref: RoleForCodeBuild
+        

@@ -4,7 +4,7 @@ WORKDIR web-app
 
 COPY package*.json ./
 
-RUN npm install
+RUN pip install
 
 COPY . .
 

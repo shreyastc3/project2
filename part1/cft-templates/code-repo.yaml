@@ -6,7 +6,7 @@
             Description: Enter repository name
         RepositoryDescription: 
             Type: String
-            Default: description test
+            Default: test
             Description: Enter repository description
 
     Resources: 
